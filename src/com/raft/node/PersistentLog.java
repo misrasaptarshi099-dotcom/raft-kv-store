@@ -1,8 +1,10 @@
 package com.raft.node;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -53,10 +55,12 @@ public class PersistentLog {
         Properties props = new Properties();
         props.setProperty("currentTerm", String.valueOf(currentTerm));
         props.setProperty("votedFor", votedFor == null ? "" : String.valueOf(votedFor));
-        try (FileOutputStream out = new FileOutputStream(stateFile)) {
+        File tmpFile = new File(dataDir, "state.properties.tmp");
+        try (FileOutputStream out = new FileOutputStream(tmpFile)) {
             props.store(out, "Raft Persistent State");
-            out.getFD().sync(); // Ensure physical flush
+            out.getFD().sync();
         }
+        Files.move(tmpFile.toPath(), stateFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
     }
 
     private synchronized void loadWal() throws IOException {
@@ -64,10 +68,19 @@ public class PersistentLog {
         if (walFile.exists()) {
             try (BufferedReader reader = new BufferedReader(new FileReader(walFile))) {
                 String line;
+                int lineNum = 0;
                 while ((line = reader.readLine()) != null) {
+                    lineNum++;
                     if (line.trim().isEmpty()) continue;
-                    LogEntry entry = mapper.readValue(line, LogEntry.class);
-                    entries.add(entry);
+                    try {
+                        LogEntry entry = mapper.readValue(line, LogEntry.class);
+                        entries.add(entry);
+                    } catch (JsonProcessingException e) {
+                        // Malformed trailing record (e.g. partial write after crash).
+                        // Stop here; all preceding valid entries are loaded.
+                        System.err.println("[" + port + "] WAL line " + lineNum + " malformed, truncating remainder: " + e.getMessage());
+                        break;
+                    }
                 }
             }
         }
@@ -131,14 +144,16 @@ public class PersistentLog {
     }
 
     private synchronized void rewriteLog() throws IOException {
-        try (FileOutputStream fos = new FileOutputStream(walFile, false);
+        File tmpFile = new File(dataDir, "wal.log.tmp");
+        try (FileOutputStream fos = new FileOutputStream(tmpFile, false);
              PrintWriter out = new PrintWriter(new BufferedWriter(new OutputStreamWriter(fos)))) {
             for (LogEntry entry : entries) {
                 out.println(mapper.writeValueAsString(entry));
             }
             out.flush();
-            fos.getFD().sync(); // Ensure physical flush
+            fos.getFD().sync();
         }
+        Files.move(tmpFile.toPath(), walFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
     }
 
     public synchronized long getLastLogIndex() {

@@ -37,6 +37,7 @@ public class RpcMessage {
 
     // Status Check Response
     private String state;
+    private Long lastApplied;
     private Map<String, String> stateMachine;
     private List<LogEntry> logEntries;
 
@@ -106,6 +107,9 @@ public class RpcMessage {
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
+
+    public Long getLastApplied() { return lastApplied; }
+    public void setLastApplied(Long lastApplied) { this.lastApplied = lastApplied; }
 
     public Map<String, String> getStateMachine() { return stateMachine; }
     public void setStateMachine(Map<String, String> stateMachine) { this.stateMachine = stateMachine; }

@@ -46,7 +46,7 @@ function Start-NodeByPort($p) {
     
     # Run the JVM in background and redirect output to log file
     # We use Start-Process with redirecting options
-    $cmdLine = "java -cp bin;lib/* com.raft.node.RaftNode $p $peers > logs/node_$p.log 2>&1"
+    $cmdLine = "java -cp bin;lib/* com.raft.node.RaftNode $p $peers > $logFile 2>&1"
     Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $cmdLine) -NoNewWindow
 }
 

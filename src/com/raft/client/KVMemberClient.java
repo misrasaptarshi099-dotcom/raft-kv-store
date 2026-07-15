@@ -78,7 +78,8 @@ public class KVMemberClient {
             System.out.println("Term:          " + resp.getTerm());
             System.out.println("Leader ID:     " + (resp.getLeaderId() == null ? "None" : resp.getLeaderId()));
             System.out.println("Commit Index:  " + resp.getLeaderCommit());
-            System.out.println("Last Applied:  " + resp.getLastLogIndex());
+            System.out.println("Last Applied:  " + resp.getLastApplied());
+            System.out.println("Last Log Idx:  " + resp.getLastLogIndex());
             System.out.println("State Machine: " + resp.getStateMachine());
             System.out.println("WAL Log size:  " + (resp.getLogEntries() != null ? resp.getLogEntries().size() : 0));
             if (resp.getLogEntries() != null && !resp.getLogEntries().isEmpty()) {
@@ -138,6 +139,7 @@ public class KVMemberClient {
                     } else {
                         System.out.println("Redirecting to leader on port " + leaderPort + "...");
                         targetPort = leaderPort;
+                        Thread.sleep(300);
                     }
                 } else {
                     System.err.println("ERROR: " + resp.getMessage());

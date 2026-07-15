@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class RaftNode implements RpcHandler {
@@ -63,8 +64,14 @@ public class RaftNode implements RpcHandler {
     public void start() {
         server.start();
         
-        // Start election timer task
-        electionTimerTask = scheduler.scheduleAtFixedRate(this::checkElectionTimeout, 50, 50, TimeUnit.MILLISECONDS);
+        // Start election timer task (guarded so a single exception doesn't kill the timer)
+        electionTimerTask = scheduler.scheduleAtFixedRate(() -> {
+            try {
+                checkElectionTimeout();
+            } catch (Throwable t) {
+                logger.log(Level.SEVERE, "Election timer task failed", t);
+            }
+        }, 50, 50, TimeUnit.MILLISECONDS);
         
         log("Node started on port " + nodeId);
     }
@@ -95,7 +102,11 @@ public class RaftNode implements RpcHandler {
     private void transitionToFollower(long term, Integer newLeaderId) {
         state = NodeState.FOLLOWER;
         leaderId = newLeaderId;
-        storage.saveState(term, null); // votedFor is reset for the new term
+        // Only clear votedFor when advancing to a new term.
+        // Same-term demotions (e.g. candidate receiving AppendEntries) must preserve the existing vote.
+        if (term > storage.getCurrentTerm()) {
+            storage.saveState(term, null);
+        }
         resetElectionTimeout();
         
         if (heartbeatTimerTask != null) {
@@ -155,6 +166,8 @@ public class RaftNode implements RpcHandler {
                         }
                     } catch (IOException e) {
                         // Peer is offline, which is fine
+                    } catch (Exception e) {
+                        logger.log(Level.WARNING, "Unexpected error in vote-request to peer", e);
                     }
                 });
             }
@@ -188,7 +201,13 @@ public class RaftNode implements RpcHandler {
             if (heartbeatTimerTask != null) {
                 heartbeatTimerTask.cancel(true);
             }
-            heartbeatTimerTask = scheduler.scheduleAtFixedRate(this::broadcastHeartbeats, 100, 100, TimeUnit.MILLISECONDS);
+            heartbeatTimerTask = scheduler.scheduleAtFixedRate(() -> {
+                try {
+                    broadcastHeartbeats();
+                } catch (Throwable t) {
+                    logger.log(Level.SEVERE, "Heartbeat task failed", t);
+                }
+            }, 100, 100, TimeUnit.MILLISECONDS);
         } finally {
             lock.unlock();
         }
@@ -391,14 +410,27 @@ public class RaftNode implements RpcHandler {
     }
 
     private void executeCommand(String commandStr) {
-        String[] parts = commandStr.split(":", 3);
-        if (parts.length < 2) return;
-        String type = parts[0];
-        String key = parts[1];
-        if ("PUT".equals(type) && parts.length == 3) {
-            stateMachine.put(key, parts[2]);
-        } else if ("DELETE".equals(type)) {
-            stateMachine.remove(key);
+        try {
+            // WAL commands are stored as JSON: {"op":"PUT","key":"k","value":"v"}
+            com.fasterxml.jackson.databind.JsonNode cmd = new com.fasterxml.jackson.databind.ObjectMapper().readTree(commandStr);
+            String type = cmd.get("op").asText();
+            String key = cmd.get("key").asText();
+            if ("PUT".equals(type) && cmd.has("value")) {
+                stateMachine.put(key, cmd.get("value").asText());
+            } else if ("DELETE".equals(type)) {
+                stateMachine.remove(key);
+            }
+        } catch (Exception e) {
+            // Fallback: try legacy colon-delimited format for backward compatibility
+            String[] parts = commandStr.split(":", 3);
+            if (parts.length < 2) return;
+            String type = parts[0];
+            String key = parts[1];
+            if ("PUT".equals(type) && parts.length == 3) {
+                stateMachine.put(key, parts[2]);
+            } else if ("DELETE".equals(type)) {
+                stateMachine.remove(key);
+            }
         }
     }
     // ==========================================
@@ -707,9 +739,17 @@ public class RaftNode implements RpcHandler {
                     return errorResp;
                 }
                 String key = parts[1];
-                // Support spaces in value
-                String val = clientCmd.substring(clientCmd.indexOf(key) + key.length()).trim();
-                logCommand = "PUT:" + key + ":" + val;
+                // Build JSON WAL command to avoid delimiter ambiguity
+                com.fasterxml.jackson.databind.node.ObjectNode walCmd = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+                walCmd.put("op", "PUT");
+                walCmd.put("key", key);
+                // Derive value from key's position in the raw command to preserve spaces
+                int keyStart = clientCmd.indexOf(" ", clientCmd.indexOf(" ") + 1);
+                String val = clientCmd.substring(keyStart).trim();
+                // Skip past the key itself
+                val = val.substring(key.length()).trim();
+                walCmd.put("value", val);
+                logCommand = walCmd.toString();
             } else if ("DELETE".equals(op)) {
                 if (parts.length < 2) {
                     RpcMessage errorResp = new RpcMessage();
@@ -718,7 +758,11 @@ public class RaftNode implements RpcHandler {
                     errorResp.setMessage("Usage: DELETE key");
                     return errorResp;
                 }
-                logCommand = "DELETE:" + parts[1];
+                logCommand = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .createObjectNode()
+                    .put("op", "DELETE")
+                    .put("key", parts[1])
+                    .toString();
             } else {
                 RpcMessage errorResp = new RpcMessage();
                 errorResp.setType("CLIENT_RESP");
@@ -776,6 +820,7 @@ public class RaftNode implements RpcHandler {
             response.setTerm(storage.getCurrentTerm());
             response.setLeaderCommit(commitIndex);
             response.setLastLogIndex(storage.getLastLogIndex());
+            response.setLastApplied(lastApplied);
             response.setLeaderId(leaderId);
             response.setStateMachine(new HashMap<>(stateMachine));
             response.setLogEntries(storage.getEntries());
