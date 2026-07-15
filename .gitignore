@@ -1,0 +1,20 @@
+# Compiled class files
+bin/
+
+# Dependency libraries (keep commented out if you want to commit JARs, or uncomment if they should be downloaded)
+# lib/
+
+# Local Raft node data (WAL and state files)
+data/
+
+# Local run logs
+logs/
+
+# IDE and Editor files
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+.gemini/
